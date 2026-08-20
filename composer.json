@@ -34,7 +34,7 @@
         "symfony/flex": "^2.4",
         "symfony/framework-bundle": "^7.4 || ^8.0",
         "symfony/phpunit-bridge": "^7.4 || ^8.0",
-        "symfony/security-bundle": "^8.1",
+        "symfony/security-bundle": "^7.4 || ^8.0",
         "symfony/var-dumper": "^7.4 || ^8.0"
     },
     "autoload": {
@@ -74,6 +74,10 @@
             "@rector-check",
             "@phpstan",
             "@test"
-        ]
+        ],
+        "auto-scripts": {
+            "cache:clear": "symfony-cmd",
+            "assets:install %PUBLIC_DIR%": "symfony-cmd"
+        }
     }
 }
