@@ -40,5 +40,15 @@ class ApiExtension extends Extension
         // Exposed as a container parameter so an application can branch on it, and so
         // `debug:container --parameter` tells the truth about what is active.
         $container->setParameter('api.enabled', true);
+
+        // Le nom de l'en-tête est de l'application, pas du bundle : trois endroits doivent
+        // s'accorder dessus (un subscriber, la description OpenAPI, la configuration CORS) et un
+        // littéral recopié dans l'un des trois finit par diverger.
+        $container->setParameter('api.tenant_header', self::asString($config['tenant_header'] ?? null, 'X-TENANT'));
+    }
+
+    private static function asString(mixed $value, string $fallback): string
+    {
+        return \is_string($value) && '' !== $value ? $value : $fallback;
     }
 }

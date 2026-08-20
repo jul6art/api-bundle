@@ -113,6 +113,7 @@ final class TestKernel extends Kernel
             public function process(ContainerBuilder $container): void
             {
                 $exposed = [
+                    'doctrine',
                     'doctrine.orm.default_entity_manager',
                     'event_dispatcher',
                     'request_stack',

@@ -1,7 +1,7 @@
 {
     "name": "jul6art/api-bundle",
     "type": "symfony-bundle",
-    "description": "Symfony API Platform bundle",
+    "description": "API Platform filters and state providers, extracted from a working application",
     "homepage": "https://github.com/jul6art/api-bundle",
     "license": "MIT",
     "authors": [
@@ -13,6 +13,9 @@
     ],
     "require": {
         "php": "^8.5",
+        "api-platform/core": "^4.3",
+        "doctrine/orm": "^3.3",
+        "jul6art/core-bundle": "^2.9",
         "symfony/config": "^7.4 || ^8.0",
         "symfony/dependency-injection": "^7.4 || ^8.0",
         "symfony/http-kernel": "^7.4 || ^8.0",
@@ -20,7 +23,6 @@
     },
     "require-dev": {
         "doctrine/doctrine-bundle": "^3.3",
-        "doctrine/orm": "^3.6",
         "friendsofphp/php-cs-fixer": "^3.68",
         "phpstan/extension-installer": "^1.4",
         "phpstan/phpstan": "^2.1",

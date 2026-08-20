@@ -26,12 +26,30 @@ final class ConfigurationTest extends TestCase
 
     public function testItAppliesItsDefaults(): void
     {
-        self::assertSame(['enabled' => true], $this->process([]));
+        self::assertSame(['enabled' => true, 'tenant_header' => 'X-TENANT'], $this->process([]));
     }
 
     public function testLaterConfigsOverrideEarlierOnes(): void
     {
-        self::assertSame(['enabled' => true], $this->process([['enabled' => false], ['enabled' => true]]));
+        self::assertSame(
+            ['enabled' => true, 'tenant_header' => 'X-TENANT'],
+            $this->process([['enabled' => false], ['enabled' => true]]),
+        );
+    }
+
+    /**
+     * Le défaut est neutre — `X-TENANT` — parce que le nom réel appartient à l'application.
+     * Renommer cet en-tête casse tous ses clients : il doit être écrit dans sa configuration, pas
+     * hérité en silence d'une constante de vendor.
+     */
+    public function testTheTenantHeaderDefaultsToANeutralName(): void
+    {
+        self::assertSame('X-TENANT', $this->process([])['tenant_header']);
+    }
+
+    public function testTheTenantHeaderIsKept(): void
+    {
+        self::assertSame('X-ORGANIZATION', $this->process([['tenant_header' => 'X-ORGANIZATION']])['tenant_header']);
     }
 
     /**

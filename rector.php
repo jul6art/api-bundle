@@ -9,7 +9,10 @@ use Rector\Renaming\Rector\Name\RenameClassRector;
 
 return RectorConfig::configure()
     ->withPaths([
+        __DIR__.'/Api',
         __DIR__.'/ApiBundle.php',
+        __DIR__.'/Filter',
+        __DIR__.'/State',
         __DIR__.'/DependencyInjection',
         __DIR__.'/Tests',
     ])

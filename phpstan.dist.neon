@@ -4,7 +4,10 @@ parameters:
         min: 80500
         max: 80599
     paths:
+        - Api
         - ApiBundle.php
+        - Filter
+        - State
         - DependencyInjection
         - Tests
         - rector.php

@@ -31,6 +31,10 @@ class Configuration implements ConfigurationInterface
                     ->info('Registers the bundle\'s services. false leaves it installed and inert.')
                     ->defaultTrue()
                 ->end()
+                ->scalarNode('tenant_header')
+                    ->info('Name of the HTTP header that scopes a request to a tenant. Exposed as the "api.tenant_header" parameter, which a request subscriber, an OpenAPI factory and the CORS configuration should all read instead of holding the literal.')
+                    ->defaultValue('X-TENANT')
+                ->end()
             ->end();
 
         return $treeBuilder;
