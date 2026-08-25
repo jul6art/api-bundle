@@ -56,6 +56,32 @@ final class SearchFilterTest extends FilterTestCase
         self::assertStringNotContainsString('INNER JOIN', $dql);
     }
 
+    /**
+     * An EMBEDDABLE is addressed directly — `w.address.city` — and must NOT be joined.
+     *
+     * ⚠️ A dotted path is not proof of a relation. Doctrine maps an embeddable's fields into the
+     * holder's own table, so `LEFT JOIN w.address` raises `Association name expected, 'address' is
+     * not an association.` — an uncaught 500 on a collection that answered perfectly until someone
+     * typed in the search box. Found on wovex the 2026-08-25: `/api/sites?search=…` had been
+     * broken since the day the filter named `address.city`, and no screen had used it yet.
+     */
+    public function testAnEmbeddedFieldIsReadDirectlyRatherThanJoined(): void
+    {
+        $dql = $this->applySearch(['name', 'address.city'], 'luxembourg');
+
+        self::assertStringContainsString('LOWER(w.address.city)', $dql);
+        self::assertStringNotContainsString('JOIN', $dql);
+    }
+
+    /** And an embedded NUMBER is cast like any other, since the path is what changed, not the type. */
+    public function testAnEmbeddedNumericFieldIsCastBeforeBeingMatched(): void
+    {
+        $dql = $this->applySearch(['address.floor'], '3');
+
+        self::assertStringContainsString('CONCAT(w.address.floor', $dql);
+        self::assertStringNotContainsString('JOIN', $dql);
+    }
+
     public function testAnEmptyTermFiltersNothing(): void
     {
         self::assertStringNotContainsString('WHERE', $this->applySearch(['name'], ''));

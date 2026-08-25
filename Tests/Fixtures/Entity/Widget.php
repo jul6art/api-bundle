@@ -10,7 +10,8 @@ use Jul6Art\CoreBundle\Entity\Traits\IdTrait;
 
 /**
  * One entity covering every shape the filters have to deal with: a text column, a numeric one, a
- * date, a JSON array, a nullable field, and an association one hop away.
+ * date, a JSON array, a nullable field, an association one hop away — and an EMBEDDABLE, whose
+ * dotted path looks like a relation and is not one.
  */
 #[ORM\Entity]
 #[ORM\Table(name: 'widget')]
@@ -38,10 +39,15 @@ class Widget
     #[ORM\ManyToOne(targetEntity: Category::class)]
     private ?Category $category = null;
 
+    /** Un EMBEDDABLE : ses champs s'adressent `w.address.city`, sans jointure. */
+    #[ORM\Embedded(class: Address::class)]
+    private Address $address;
+
     public function __construct(string $name = 'Widget')
     {
         $this->name = $name;
         $this->issuedAt = new \DateTimeImmutable();
+        $this->address = new Address();
     }
 
     public function getName(): string
@@ -97,6 +103,11 @@ class Widget
         $this->roles = $roles;
 
         return $this;
+    }
+
+    public function getAddress(): Address
+    {
+        return $this->address;
     }
 
     public function getCategory(): ?Category

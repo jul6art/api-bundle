@@ -82,7 +82,17 @@ final class OrSearchFilter extends AbstractFilter
 
         foreach (array_keys($this->getProperties() ?? []) as $field) {
             $field = (string) $field;
-            if (str_contains($field, '.')) {
+            // ⚠️ A dot does NOT prove a relation. Doctrine maps an EMBEDDABLE's fields into the
+            // holder's own table and addresses them as `w.address.city` — joining `w.address`
+            // raises `Association name expected, 'address' is not an association.`, an uncaught
+            // 500 on a collection that answered perfectly until someone typed in the search box.
+            // The embedded case is therefore settled FIRST, on the metadata rather than on the
+            // shape of the string.
+            if (str_contains($field, '.') && $this->isMappedField($resourceClass, $field)) {
+                $column = $this->isNumericField($resourceClass, $field)
+                    ? "LOWER(CONCAT({$alias}.{$field}, ''))"
+                    : "LOWER({$alias}.{$field})";
+            } elseif (str_contains($field, '.')) {
                 [$relation, $subField] = explode('.', $field, 2);
                 if (!isset($relationAliases[$relation])) {
                     $joinAlias = $queryNameGenerator->generateJoinAlias($relation);
@@ -148,6 +158,25 @@ final class OrSearchFilter extends AbstractFilter
         }
 
         return \in_array($targetMetadata->getTypeOfField($field), self::NUMERIC_TYPES, true);
+    }
+
+    /**
+     * Is this dotted path a field of the resource ITSELF — that is, an embeddable's column?
+     *
+     * Doctrine registers `address.city` in the holder's own field mappings, so `hasField()`
+     * answers for it directly. A relation path (`category.label`) is not there: the field belongs
+     * to another class.
+     */
+    private function isMappedField(string $resourceClass, string $property): bool
+    {
+        if (!$this->managerRegistry instanceof ManagerRegistry || !class_exists($resourceClass)) {
+            return false;
+        }
+
+        /** @var class-string $resourceClass */
+        $manager = $this->managerRegistry->getManagerForClass($resourceClass);
+
+        return $manager instanceof ObjectManager && $manager->getClassMetadata($resourceClass)->hasField($property);
     }
 
     private function isNumericField(string $resourceClass, string $property): bool
