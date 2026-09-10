@@ -14,7 +14,7 @@
     "require": {
         "api-platform/core": "^4.3",
         "doctrine/orm": "^3.5",
-        "jul6art/core-bundle": "^2.9",
+        "jul6art/core-bundle": "^2.9 || ^3.0",
         "php": "^8.5",
         "symfony/config": "^7.4 || ^8.0",
         "symfony/dependency-injection": "^7.4 || ^8.0",

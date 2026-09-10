@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Jul6Art\ApiBundle\Tests\Fixtures\Entity;
 
+use Doctrine\DBAL\Types\Types;
 use Doctrine\ORM\Mapping as ORM;
 
 /**
@@ -19,7 +20,7 @@ class Address
     private ?string $city = null;
 
     /** Numeric on purpose: an embedded number still has to be cast before a LIKE. */
-    #[ORM\Column(type: 'integer', nullable: true)]
+    #[ORM\Column(type: Types::INTEGER, nullable: true)]
     private ?int $floor = null;
 
     public function getCity(): ?string
