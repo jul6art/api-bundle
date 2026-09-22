@@ -133,32 +133,4 @@ final readonly class CaseInsensitiveOrderFilter implements FilterInterface, Open
         $queryBuilder->addSelect(\sprintf('CASE WHEN %s.%s IS NULL THEN 0 ELSE 1 END AS HIDDEN %s', $alias, $field, $nullRankHiddenField));
         $queryBuilder->addOrderBy($nullRankHiddenField, 'DESC' === $nullsDirection ? \SortDirection::Descending : \SortDirection::Ascending);
     }
-
-    /**
-     * The class that owns the last segment of `$property`, walking its associations
-     * (`contact.company.name` → `Company`). An embeddable's column stays on its holder.
-     *
-     * @param class-string $resourceClass
-     *
-     * @return class-string|null
-     */
-    private function leafClassOf(QueryBuilder $queryBuilder, string $resourceClass, string $property): ?string
-    {
-        $class = $resourceClass;
-        $segments = explode('.', $property);
-        array_pop($segments);
-
-        foreach ($segments as $index => $segment) {
-            $target = $this->associationTargetOf($queryBuilder, $class, $segment);
-
-            if (null === $target) {
-                // Not an association: the rest of the path is an embeddable's column on `$class`.
-                return null !== $this->fieldTypeOf($queryBuilder, $class, implode('.', \array_slice(explode('.', $property), $index))) ? $class : null;
-            }
-
-            $class = $target;
-        }
-
-        return $class;
-    }
 }

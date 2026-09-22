@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Jul6Art\ApiBundle\Filter;
 
 use ApiPlatform\Doctrine\Orm\Filter\FilterInterface;
+use ApiPlatform\Doctrine\Orm\Util\QueryBuilderHelper;
 use ApiPlatform\Doctrine\Orm\Util\QueryNameGeneratorInterface;
 use ApiPlatform\Metadata\JsonSchemaFilterInterface;
 use ApiPlatform\Metadata\OpenApiParameterFilterInterface;
@@ -70,9 +71,20 @@ final class RelationFilter implements FilterInterface, OpenApiParameterFilterInt
 
         [$alias, $field] = $joined;
         $parameterName = $queryNameGenerator->generateParameterName($field);
+        $compared = $alias.'.'.$field;
+
+        // ⚠️ A collection (`quote.defects`) cannot be compared to a value — `q.defects = :id` is not
+        // DQL. It is joined, and the joined entity is what gets compared, as the legacy SearchFilter
+        // did.
+        $owner = $this->leafClassOf($queryBuilder, $resourceClass, $property);
+
+        if (null !== $owner && ($this->metadataOf($queryBuilder, $owner)?->isCollectionValuedAssociation($field) ?? false)) {
+            $compared = QueryBuilderHelper::addJoinOnce($queryBuilder, $queryNameGenerator, $alias, $field);
+        }
+
         $condition = \is_array($value)
-            ? \sprintf('%s.%s IN (:%s)', $alias, $field, $parameterName)
-            : \sprintf('%s.%s = :%s', $alias, $field, $parameterName);
+            ? \sprintf('%s IN (:%s)', $compared, $parameterName)
+            : \sprintf('%s = :%s', $compared, $parameterName);
 
         // `orWhere` when API Platform's `OrFilter` composes this filter with others, `andWhere`
         // otherwise — the only two clauses a filter is asked to use.

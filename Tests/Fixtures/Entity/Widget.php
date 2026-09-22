@@ -4,13 +4,15 @@ declare(strict_types=1);
 
 namespace Jul6Art\ApiBundle\Tests\Fixtures\Entity;
 
+use Doctrine\Common\Collections\ArrayCollection;
+use Doctrine\Common\Collections\Collection;
 use Doctrine\DBAL\Types\Types;
 use Doctrine\ORM\Mapping as ORM;
 use Jul6Art\CoreBundle\Entity\Traits\IdTrait;
 
 /**
  * One entity covering every shape the filters have to deal with: a text column, a numeric one, a
- * date, a JSON array, a nullable field, an association one hop away — and an EMBEDDABLE, whose
+ * date, a JSON array, a nullable field, an association one hop away, a collection — and an EMBEDDABLE, whose
  * dotted path looks like a relation and is not one.
  */
 #[ORM\Entity]
@@ -40,6 +42,15 @@ class Widget
     private ?Category $category = null;
 
     /** Un EMBEDDABLE : ses champs s'adressent `w.address.city`, sans jointure. */
+    /**
+     * A COLLECTION: a relation filter cannot compare it to a value, it has to join it first.
+     *
+     * @var Collection<int, Category>
+     */
+    #[ORM\ManyToMany(targetEntity: Category::class)]
+    #[ORM\JoinTable(name: 'widget_tag')]
+    private Collection $tags;
+
     #[ORM\Embedded(class: Address::class)]
     private Address $address;
 
@@ -48,6 +59,7 @@ class Widget
         $this->name = $name;
         $this->issuedAt = new \DateTimeImmutable();
         $this->address = new Address();
+        $this->tags = new ArrayCollection();
     }
 
     public function getName(): string

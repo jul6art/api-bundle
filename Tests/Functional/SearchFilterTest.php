@@ -147,6 +147,17 @@ final class SearchFilterTest extends FilterTestCase
         self::assertMatchesRegularExpression('/\w+\.parent = :\w+/', $dql);
     }
 
+    /**
+     * ⚠️ `w.tags = :id` is not DQL — a collection has to be joined, and the joined entity compared.
+     * A quote filtered by one of its defects sends exactly this.
+     */
+    public function testACollectionIsJoinedAndItsMemberCompared(): void
+    {
+        $dql = $this->applyFilter(new RelationFilter(), $this->parameter('tags', ['12', '14'], 'tags'));
+
+        self::assertMatchesRegularExpression('/JOIN w\.tags (\w+) WHERE \1 IN \(:\w+\)/', $dql);
+    }
+
     public function testAnOperatorMapIsNotARelationLookup(): void
     {
         self::assertStringNotContainsString('WHERE', $this->applyFilter(new RelationFilter(), $this->parameter('category', ['gt' => '3'], 'category')));
