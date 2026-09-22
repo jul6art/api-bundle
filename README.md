@@ -120,7 +120,9 @@ holder rather than joined, and a non-scalar or empty term filters nothing rather
 ```
 
 `?customer=12`, `?customer=/api/customers/12` and `?customer[]=12&customer[]=14` all work, as they
-did with the legacy `SearchFilter`.
+did with the legacy `SearchFilter`. A collection (`#[QueryParameter(key: 'defects', filter: new
+RelationFilter(), property: 'defects')]`) is joined, and its members compared — `q.defects = :id`
+is not DQL.
 
 > ⚠️ **Why not API Platform's `IriFilter`**, which the 4.4 upgrade command maps a relation
 > `SearchFilter` to: it accepts IRIs only. A plain identifier — what a datatable filter sends — is
