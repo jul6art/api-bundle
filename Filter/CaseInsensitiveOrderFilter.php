@@ -5,48 +5,45 @@ declare(strict_types=1);
 namespace Jul6Art\ApiBundle\Filter;
 
 use ApiPlatform\Doctrine\Common\Filter\OrderFilterInterface;
-use ApiPlatform\Doctrine\Common\Filter\OrderFilterTrait;
-use ApiPlatform\Doctrine\Orm\Filter\AbstractFilter;
+use ApiPlatform\Doctrine\Orm\Filter\FilterInterface;
 use ApiPlatform\Doctrine\Orm\Util\QueryNameGeneratorInterface;
+use ApiPlatform\Metadata\JsonSchemaFilterInterface;
+use ApiPlatform\Metadata\OpenApiParameterFilterInterface;
 use ApiPlatform\Metadata\Operation;
 use ApiPlatform\Metadata\Parameter;
+use ApiPlatform\Metadata\SortFilterInterface;
 use Doctrine\DBAL\Types\Types;
 use Doctrine\ORM\Query\Expr\Join;
 use Doctrine\ORM\QueryBuilder;
-use Doctrine\Persistence\ManagerRegistry;
-use Psr\Log\LoggerInterface;
-use Symfony\Component\Serializer\NameConverter\NameConverterInterface;
 
 /**
- * Drop-in replacement for `ApiPlatform\Doctrine\Orm\Filter\OrderFilter` that
- * sorts text columns case-insensitively (e.g. `Apple, banana, cherry`
- * instead of `Apple, Banana, apple, banana`).
+ * API Platform's {@see \ApiPlatform\Doctrine\Orm\Filter\SortFilter}, but case-insensitive on text
+ * columns (`Apple, banana, cherry` instead of `Apple, Banana, apple, banana`).
  *
- * Behavior:
- *   - Text-typed columns (`string`, `text`, `ascii_string`, `citext`,
- *     `guid`) are wrapped in `LOWER(...)` in the ORDER BY clause.
- *   - Non-text columns (int, datetime, enum, boolean, …) sort as before.
- *   - Nested properties (e.g. `?order[contact.firstName]=asc`) are
- *     handled the same way the upstream filter handles them, with
- *     `LOWER()` applied to the joined column when it's text-typed.
+ *   - Text columns (`string`, `text`, `ascii_string`, `guid`) are ordered by `LOWER(...)`.
+ *   - Other columns (int, datetime, enum, boolean…) sort exactly as `SortFilter` would.
+ *   - Nested properties (`order[contact.firstName]`) are LEFT-joined, and `LOWER()` applies to the
+ *     joined column when it is text.
  *
- * Why a copy instead of a subclass: `OrderFilter` is `final`. The trait +
- * abstract base do the heavy lifting, so the duplication is cheap.
+ * Declared on the resource (API Platform ≥ 4.4), with the sortable properties listed — a
+ * `:property` template WITHOUT `properties` expands to every property of the resource, which would
+ * make columns sortable that nobody meant to expose:
  *
- * Tradeoffs:
- *   - `LOWER()` defeats functional indexes that aren't `LOWER()`-aware.
- *     For tables where sort speed matters (e.g. millions of rows), add a
- *     `CREATE INDEX … (LOWER(name))` migration alongside the existing
- *     index.
- *   - Postgres `LOWER()` is locale-sensitive only when the database
- *     collation is. We rely on the project default `en_US.UTF-8` which
- *     handles Latin diacritics correctly.
+ *   #[QueryParameter(key: 'order[:property]', filter: new CaseInsensitiveOrderFilter(), properties: ['name', 'email', 'createdAt'])]
+ *
+ * ⚠️ **One `order[:property]` template per resource.** Parameters are keyed by their key, so a second
+ * template on the same class replaces the first. A property ordered by another filter
+ * ({@see RankedOrderFilter}, {@see ConcatOrderFilter}) is declared under its own explicit key.
+ *
+ * Tradeoff: `LOWER()` defeats indexes that are not `LOWER()`-aware. Where sort speed matters on a
+ * large table, add a `CREATE INDEX … (LOWER(name))` next to the plain one.
  */
-final class CaseInsensitiveOrderFilter extends AbstractFilter implements OrderFilterInterface
+final readonly class CaseInsensitiveOrderFilter implements FilterInterface, OpenApiParameterFilterInterface, JsonSchemaFilterInterface, SortFilterInterface
 {
-    use OrderFilterTrait;
+    use NestedJoinTrait;
+    use ParameterFilterTrait;
 
-    /** @var array<string, true> Doctrine field types we wrap in LOWER(). */
+    /** @var array<string, true> Doctrine field types ordered through LOWER(). */
     private const array TEXT_TYPES = [
         Types::STRING => true,
         Types::TEXT => true,
@@ -55,29 +52,12 @@ final class CaseInsensitiveOrderFilter extends AbstractFilter implements OrderFi
     ];
 
     /**
-     * @param array<string, mixed>|null $properties
+     * @param string|null $nullsComparison one of the `OrderFilterInterface::NULLS_*` modes, or null to
+     *                                     leave NULL placement to the database
      */
     public function __construct(
-        ?ManagerRegistry $managerRegistry = null,
-        string $orderParameterName = 'order',
-        ?LoggerInterface $logger = null,
-        ?array $properties = null,
-        ?NameConverterInterface $nameConverter = null,
-        private readonly ?string $orderNullsComparison = null,
+        private ?string $nullsComparison = null,
     ) {
-        if (null !== $properties) {
-            $properties = array_map(static function ($propertyOptions) {
-                if (\is_string($propertyOptions)) {
-                    return ['default_direction' => $propertyOptions];
-                }
-
-                return $propertyOptions;
-            }, $properties);
-        }
-
-        parent::__construct($managerRegistry, $logger, $properties, $nameConverter);
-
-        $this->orderParameterName = $orderParameterName;
     }
 
     /**
@@ -91,162 +71,94 @@ final class CaseInsensitiveOrderFilter extends AbstractFilter implements OrderFi
         ?Operation $operation = null,
         array $context = [],
     ): void {
-        // `$context` arrive non typé d'API Platform : on le réduit à ce qu'on sait en lire, une
-        // fois, plutôt que d'affirmer sa forme à chaque accès.
-        $filters = \is_array($context['filters'] ?? null) ? $context['filters'] : null;
-        $parameter = ($context['parameter'] ?? null) instanceof Parameter ? $context['parameter'] : null;
+        $parameter = $this->parameterOf($context);
+        $property = $parameter?->getProperty();
+        $direction = $parameter instanceof Parameter ? $this->sortDirectionOf($this->valueOf($parameter)) : null;
+        $rootAlias = $this->rootAliasOf($queryBuilder);
 
-        $ordering = \is_array($filters[$this->orderParameterName] ?? null) ? $filters[$this->orderParameterName] : null;
-
-        if (null !== $filters && null === $ordering && !$parameter instanceof Parameter) {
+        if (!$parameter instanceof Parameter || !\is_string($property)) {
             return;
         }
 
-        // Un paramètre nommé (API Platform 4) désigne une propriété unique : il gagne sur la
-        // lecture du paramètre `order`.
-        if ($parameter instanceof Parameter) {
-            $property = $parameter->getProperty();
-
-            if (\is_string($property) && null !== ($value = $filters[$property] ?? null)) {
-                $this->filterProperty($this->denormalizePropertyName($property), $value, $queryBuilder, $queryNameGenerator, $resourceClass, $operation, $context);
-
-                return;
-            }
-        }
-
-        foreach ($ordering ?? [] as $property => $value) {
-            $this->filterProperty($this->denormalizePropertyName($property), $value, $queryBuilder, $queryNameGenerator, $resourceClass, $operation, $context);
-        }
-    }
-
-    protected function filterProperty(
-        string $property,
-        mixed $value,
-        QueryBuilder $queryBuilder,
-        QueryNameGeneratorInterface $queryNameGenerator,
-        string $resourceClass,
-        ?Operation $operation = null,
-        array $context = [],
-    ): void {
-        if (!$this->isPropertyEnabled($property, $resourceClass) || !$this->isPropertyMapped($property, $resourceClass)) {
+        if (!$direction instanceof \SortDirection || !\is_string($rootAlias)) {
             return;
         }
 
-        $direction = $this->normalizeValue($value, $property);
-        if (null === $direction) {
+        $joined = $this->joinedPathOf($property, $rootAlias, $queryBuilder, $queryNameGenerator, $parameter, Join::LEFT_JOIN);
+
+        if (null === $joined) {
             return;
         }
 
-        $rootAlias = $queryBuilder->getRootAliases()[0] ?? null;
+        [$alias, $field] = $joined;
+        $leafClass = $this->leafClassOf($queryBuilder, $resourceClass, $property);
 
-        if (!\is_string($rootAlias)) {
-            return;
-        }
+        $this->orderNulls($queryBuilder, $alias, $field, $direction);
 
-        $alias = $rootAlias;
-        $field = $property;
-        $targetClass = $resourceClass;
+        $type = null === $leafClass ? null : $this->fieldTypeOf($queryBuilder, $leafClass, $field);
 
-        if ($this->isPropertyNested($property, $resourceClass)) {
-            // The third element of `addJoinsForNestedProperty()` is the *associations chain* (an
-            // array of association names), not a class-string. Walk the metadata to resolve the
-            // leaf entity class so `isTextField()` can read the field type.
-            //
-            // Nothing about that return is typed, so it is narrowed here rather than asserted at
-            // each use: a shape that turns out different should stop the filter, not order by a
-            // field name built out of an array.
-            [$joinAlias, $joinField, $associations] = $this->addJoinsForNestedProperty($property, $alias, $queryBuilder, $queryNameGenerator, $resourceClass, Join::LEFT_JOIN);
-
-            if (!\is_string($joinAlias) || !\is_string($joinField) || !\is_array($associations)) {
-                return;
-            }
-
-            $alias = $joinAlias;
-            $field = $joinField;
-            $targetClass = $this->resolveAssociationsTarget(
-                $resourceClass,
-                array_values(array_filter($associations, \is_string(...))),
-            );
-        }
-
-        // `$this->properties` vient d'`AbstractFilter` et n'est pas typé : on le lit en une fois.
-        $propertyConfig = \is_array($this->properties[$property] ?? null) ? $this->properties[$property] : [];
-        $nullsComparison = $propertyConfig['nulls_comparison'] ?? $this->orderNullsComparison;
-
-        if (\is_string($nullsComparison) && isset(self::NULLS_DIRECTION_MAP[$nullsComparison][$direction])) {
-            $nullsDirection = self::NULLS_DIRECTION_MAP[$nullsComparison][$direction];
-
-            $nullRankHiddenField = \sprintf('_%s_%s_null_rank', $alias, str_replace('.', '_', $field));
-
-            $queryBuilder->addSelect(\sprintf('CASE WHEN %s.%s IS NULL THEN 0 ELSE 1 END AS HIDDEN %s', $alias, $field, $nullRankHiddenField));
-            $queryBuilder->addOrderBy($nullRankHiddenField, $nullsDirection);
-        }
-
-        if ($this->isTextField($targetClass, $field)) {
-            // API Platform's `PaginationExtension` parses ORDER BY clauses
-            // naively (split on `.`, take the first token as the root
-            // alias). A function call like `LOWER(c.lastName)` breaks that
-            // parser with `The alias "LOWER(c" does not exist`. Workaround
-            // — add the lowered expression as a HIDDEN select with a
-            // simple alias and order by that alias instead.
+        if (null !== $type && isset(self::TEXT_TYPES[$type])) {
+            // API Platform's `PaginationExtension` parses ORDER BY clauses naively (split on `.`,
+            // first token = root alias): `LOWER(c.lastName)` breaks it with « The alias "LOWER(c"
+            // does not exist ». The lowered expression goes into a HIDDEN select with a plain alias,
+            // and the query orders by that alias.
             $hiddenAlias = \sprintf('_ci_order_%s_%s', $alias, str_replace('.', '_', $field));
             $queryBuilder->addSelect(\sprintf('LOWER(%s.%s) AS HIDDEN %s', $alias, $field, $hiddenAlias));
             $queryBuilder->addOrderBy($hiddenAlias, $direction);
-        } else {
-            $queryBuilder->addOrderBy(\sprintf('%s.%s', $alias, $field), $direction);
-        }
-    }
 
-    private function isTextField(string $resourceClass, string $field): bool
-    {
-        try {
-            $metadata = $this->getClassMetadata($resourceClass);
-        } catch (\Throwable) {
-            return false;
+            return;
         }
 
-        if (!$metadata->hasField($field)) {
-            return false;
-        }
-
-        $type = $metadata->getTypeOfField($field);
-
-        return null !== $type && isset(self::TEXT_TYPES[$type]);
+        $queryBuilder->addOrderBy(\sprintf('%s.%s', $alias, $field), $direction);
     }
 
     /**
-     * Walks the associations chain returned by `addJoinsForNestedProperty()`
-     * to resolve the class-string of the leaf entity (e.g. for the path
-     * `Page::translations.title` with associations `['translations']`,
-     * returns `PageTranslation::class`). Falls back to the root resource
-     * class if the chain can't be resolved (defensive — caller will treat
-     * the field as non-text and skip the LOWER wrap).
-     *
-     * @param class-string       $resourceClass
-     * @param array<int, string> $associations
-     *
-     * @return class-string
+     * @return array<string, mixed>
      */
-    private function resolveAssociationsTarget(string $resourceClass, array $associations): string
+    public function getSchema(Parameter $parameter): array
     {
-        $current = $resourceClass;
-        foreach ($associations as $assoc) {
-            try {
-                $metadata = $this->getClassMetadata($current);
-            } catch (\Throwable) {
-                return $resourceClass;
-            }
-            if (!$metadata->hasAssociation($assoc)) {
-                return $resourceClass;
-            }
-            $target = $metadata->getAssociationTargetClass($assoc);
-            if (null === $target || '' === $target) {
-                return $resourceClass;
-            }
-            $current = $target;
+        return ['type' => 'string', 'enum' => ['asc', 'desc', 'ASC', 'DESC']];
+    }
+
+    private function orderNulls(QueryBuilder $queryBuilder, string $alias, string $field, \SortDirection $direction): void
+    {
+        $key = \SortDirection::Descending === $direction ? OrderFilterInterface::DIRECTION_DESC : OrderFilterInterface::DIRECTION_ASC;
+        $nullsDirection = null === $this->nullsComparison ? null : (OrderFilterInterface::NULLS_DIRECTION_MAP[$this->nullsComparison][$key] ?? null);
+
+        if (null === $nullsDirection) {
+            return;
         }
 
-        /* @var class-string $current */
-        return $current;
+        $nullRankHiddenField = \sprintf('_%s_%s_null_rank', $alias, str_replace('.', '_', $field));
+        $queryBuilder->addSelect(\sprintf('CASE WHEN %s.%s IS NULL THEN 0 ELSE 1 END AS HIDDEN %s', $alias, $field, $nullRankHiddenField));
+        $queryBuilder->addOrderBy($nullRankHiddenField, 'DESC' === $nullsDirection ? \SortDirection::Descending : \SortDirection::Ascending);
+    }
+
+    /**
+     * The class that owns the last segment of `$property`, walking its associations
+     * (`contact.company.name` → `Company`). An embeddable's column stays on its holder.
+     *
+     * @param class-string $resourceClass
+     *
+     * @return class-string|null
+     */
+    private function leafClassOf(QueryBuilder $queryBuilder, string $resourceClass, string $property): ?string
+    {
+        $class = $resourceClass;
+        $segments = explode('.', $property);
+        array_pop($segments);
+
+        foreach ($segments as $index => $segment) {
+            $target = $this->associationTargetOf($queryBuilder, $class, $segment);
+
+            if (null === $target) {
+                // Not an association: the rest of the path is an embeddable's column on `$class`.
+                return null !== $this->fieldTypeOf($queryBuilder, $class, implode('.', \array_slice(explode('.', $property), $index))) ? $class : null;
+            }
+
+            $class = $target;
+        }
+
+        return $class;
     }
 }

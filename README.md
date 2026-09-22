@@ -7,7 +7,7 @@ Symfony API Platform bundle
 
 <p align="left">
     <a href="https://opensource.org/licenses/MIT" target="_blank"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License"></a>
-    <img src="https://img.shields.io/static/v1?label=stable&message=v1&color=0ea5e9" alt="Version">
+    <img src="https://img.shields.io/static/v1?label=stable&message=v2&color=0ea5e9" alt="Version">
 </p>
 
 Symfony API Platform bundle
@@ -17,6 +17,8 @@ Requirements
 
 - PHP ^8.5
 - Symfony ^7.4 || ^8.0
+- API Platform ^4.4
+- Doctrine ORM ^3.7
 
 Installation
 ------------
@@ -46,20 +48,32 @@ api:
 Usage
 -----
 
-Six Doctrine ORM filters and one state provider, extracted from an application that runs them.
-Everything here is registered the ordinary API Platform way — as a service, referenced from an
-`#[ApiFilter]` — so there is nothing to configure beyond the tenant header below.
+Seven Doctrine ORM filters and one state provider, extracted from the applications that run them.
+
+Since **2.0** they follow API Platform **4.4**'s filter model: a filter is declared through a
+`#[QueryParameter]` on the resource, receives that parameter with the request value already
+extracted, and reads its configuration from the parameter (`property`, `properties`) or from its own
+constructor. `#[ApiFilter]` and `AbstractFilter` are deprecated upstream and removed in 6.0 — none
+of these filters extends it any more. Upgrading from 1.x: see [Upgrading to 2.0](#upgrading-to-20).
 
 ### Ordering a text column the way a human reads it
 
 ```php
-#[ApiFilter(CaseInsensitiveOrderFilter::class, properties: ['name', 'email'])]
+#[QueryParameter(key: 'order[:property]', filter: new CaseInsensitiveOrderFilter(), properties: ['name', 'email', 'createdAt'])]
 class Contact { … }
 ```
 
 `ORDER BY name` sorts by byte value on PostgreSQL, so `Apple, banana, Cherry` comes back as
 `Apple, Cherry, banana` and the list looks broken. This filter lowers the column first — and only
-for text columns, since lowering an integer is a cast the database does per row for nothing.
+for text columns, since lowering an integer is a cast the database does per row for nothing. Nested
+properties (`order[company.name]`) are LEFT-joined. NULL placement is a constructor option:
+`new CaseInsensitiveOrderFilter(OrderFilterInterface::NULLS_ALWAYS_LAST)`.
+
+> ⚠️ **List the `properties`.** A `:property` template without them expands to EVERY property of
+> the resource — columns become sortable that nobody meant to expose, which is not what 1.x did.
+
+> ⚠️ **One `order[:property]` template per resource.** Parameters are keyed by their key: a second
+> template on the same class replaces the first. Give the other ordering filters explicit keys.
 
 > ⚠️ **It does not emit `ORDER BY LOWER(...)`, and that is deliberate.** API Platform's pagination
 > extension parses ORDER BY by splitting on `.` and taking the first token as an alias, so
@@ -70,7 +84,7 @@ for text columns, since lowering an integer is a cast the database does per row 
 ### Ordering by business rank rather than alphabet
 
 ```php
-#[ApiFilter(RankedOrderFilter::class, properties: ['status' => ['todo', 'doing', 'done']])]
+#[QueryParameter(key: 'order[status]', property: 'status', filter: new RankedOrderFilter(['todo', 'doing', 'done']))]
 ```
 
 `ORDER BY status` gives `doing, done, todo` — alphabetical, and meaningless to a user. This orders
@@ -80,38 +94,57 @@ sorts last, never first: a status nobody planned for should not open the list.
 ### One sortable property over several columns
 
 ```php
-#[ApiFilter(ConcatOrderFilter::class, properties: ['fullName' => ['lastName', 'firstName']])]
+#[QueryParameter(key: 'order[fullName]', filter: new ConcatOrderFilter(['lastName', 'firstName']))]
 ```
 
 ### One search box over several columns
 
 ```php
-#[ApiFilter(OrSearchFilter::class, properties: ['name', 'reference', 'category.label'])]
+#[QueryParameter(key: 'search', filter: new OrSearchFilter(), properties: ['name', 'reference', 'category.label', 'address.city'])]
 ```
 
 `?search=term` becomes a single OR group. A filter per column would AND them together and only
 match rows where *every* column contains the term.
 
-Three things it handles that a naive implementation does not: a numeric column is cast
-(`CONCAT(col, '')`) before the LIKE, a relation one hop away is reached with a **LEFT** JOIN — so a
-row without a category still matches on its own name — and a non-scalar or empty term filters
-nothing rather than producing `LIKE '%%'`.
+What it handles that a naive implementation does not: a numeric column is cast (`CONCAT(col, '')`)
+before the LIKE, a relation one hop away is reached with a **LEFT** JOIN — so a row without a
+category still matches on its own name —, an embeddable's column (`address.city`) is read on the
+holder rather than joined, and a non-scalar or empty term filters nothing rather than producing
+`LIKE '%%'`.
+
+### Filtering on a relation — by identifier OR by IRI
+
+```php
+#[QueryParameter(key: 'customer', filter: new RelationFilter())]
+#[QueryParameter(key: 'site.customer', filter: new RelationFilter(), property: 'site.customer')]
+```
+
+`?customer=12`, `?customer=/api/customers/12` and `?customer[]=12&customer[]=14` all work, as they
+did with the legacy `SearchFilter`.
+
+> ⚠️ **Why not API Platform's `IriFilter`**, which the 4.4 upgrade command maps a relation
+> `SearchFilter` to: it accepts IRIs only. A plain identifier — what a datatable filter sends — is
+> logged as an error and the filter is IGNORED: the collection answers with every row, silently.
+> `RelationParameterProvider` resolves IRIs (never by cutting the last segment: an IRI may carry a
+> public uuid while Doctrine joins on the integer id) and leaves identifiers alone; an IRI that
+> designates nothing matches no row.
 
 ### Filtering by year
 
 ```php
-#[ApiFilter(YearFilter::class, properties: ['issuedAt'])]
+#[QueryParameter(key: 'issuedAt', filter: new YearFilter())]
 ```
 
 `?issuedAt=2026` becomes a half-open range, `>= 2026-01-01 AND < 2027-01-01` — not `YEAR(col) =
 2026`. Two reasons: `YEAR()` needs a DQL extension to be portable, and wrapping the column in a
 function makes any index on it useless, which turns a filtered accounting journal from an index
-scan into a full table scan.
+scan into a full table scan. On a key a `DateFilter` also uses, compose both with API Platform's
+`ChainFilter`.
 
 ### Searching inside a JSON column
 
 ```php
-#[ApiFilter(JsonContainsFilter::class, properties: ['roles'])]
+#[QueryParameter(key: 'roles', filter: new JsonContainsFilter())]
 ```
 
 `?roles=ROLE_ADMIN` casts the column to text and matches it with a portable LIKE.
@@ -179,6 +212,29 @@ one of the three is how they drift.
 bundle is to carry it **once** instead of in every application. The test suite asserts the DQL
 those filters produce, so an upstream change that alters the contract shows up here rather than in
 a sorted list nobody checks.
+
+Upgrading to 2.0
+----------------
+
+2.0 requires **API Platform ^4.4** and **Doctrine ORM ^3.7** (the sort directions are
+`\SortDirection` enums). Every `#[ApiFilter]` of a resource becomes a class-level `#[QueryParameter]`,
+placed where the `#[ApiFilter]` was so the comments that explain it stay next to it:
+
+| 1.x | 2.0 |
+|---|---|
+| `#[ApiFilter(CaseInsensitiveOrderFilter::class, properties: ['a', 'b'])]` | `#[QueryParameter(key: 'order[:property]', filter: new CaseInsensitiveOrderFilter(), properties: ['a', 'b'])]` |
+| `#[ApiFilter(RankedOrderFilter::class, properties: ['status' => [...]])]` | `#[QueryParameter(key: 'order[status]', property: 'status', filter: new RankedOrderFilter([...]))]` |
+| `#[ApiFilter(ConcatOrderFilter::class, properties: ['fullName' => [...]])]` | `#[QueryParameter(key: 'order[fullName]', filter: new ConcatOrderFilter([...]))]` |
+| `#[ApiFilter(OrSearchFilter::class, properties: [...])]` | `#[QueryParameter(key: 'search', filter: new OrSearchFilter(), properties: [...])]` |
+| `#[ApiFilter(JsonContainsFilter::class, properties: ['roles'])]` | `#[QueryParameter(key: 'roles', filter: new JsonContainsFilter())]` |
+| `#[ApiFilter(YearFilter::class, properties: ['issuedAt'])]` | `#[QueryParameter(key: 'issuedAt', filter: new YearFilter())]` |
+| API Platform `SearchFilter` on a **relation** | `#[QueryParameter(key: '<relation>', filter: new RelationFilter())]` |
+
+For API Platform's own filters, follow its mapping (`OrderFilter` → `SortFilter`, `SearchFilter`
+exact → `ExactFilter`, partial → `PartialSearchFilter`, `BooleanFilter` → `ExactFilter` with a `bool`
+native type) — **but list the `properties` of every `:property` template yourself**: the upstream
+`api:upgrade-filter` command writes `new SortFilter()` without them, which opens sorting on every
+property of the resource, and it rewrites the whole `#[ApiResource]` attribute without its comments.
 
 Quality assurance
 -----------------

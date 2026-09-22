@@ -4,49 +4,48 @@ declare(strict_types=1);
 
 namespace Jul6Art\ApiBundle\Filter;
 
-use ApiPlatform\Doctrine\Orm\Filter\AbstractFilter;
+use ApiPlatform\Doctrine\Orm\Filter\FilterInterface;
 use ApiPlatform\Doctrine\Orm\Util\QueryNameGeneratorInterface;
+use ApiPlatform\Metadata\JsonSchemaFilterInterface;
+use ApiPlatform\Metadata\OpenApiParameterFilterInterface;
 use ApiPlatform\Metadata\Operation;
+use ApiPlatform\Metadata\Parameter;
 use Doctrine\DBAL\Types\Types;
-use Doctrine\ORM\Mapping\ClassMetadata as ORMClassMetadata;
 use Doctrine\ORM\QueryBuilder;
-use Doctrine\Persistence\ManagerRegistry;
-use Doctrine\Persistence\ObjectManager;
 
 /**
- * OR search filter — searches across multiple properties with OR logic.
+ * OR search filter — one search term applied to several fields, joined by OR.
  *
- * Unlike the default SearchFilter which uses AND between properties,
- * this filter applies a single search term to multiple fields with OR.
+ * API Platform's own search filters combine parameters with AND; a global search box needs the
+ * opposite: « does ANY of these columns contain what was typed? ».
  *
- * Supports both **direct fields** (`title`, `email`) and **single-hop
- * relation paths** (`contact.firstName`, `deal.title`). Relation paths
- * trigger a `LEFT JOIN` so a missing relation simply means "no row
- * matches that branch of the OR" instead of dropping the row entirely.
+ * Supports **direct fields** (`title`, `email`), **embeddable columns** (`address.city`) and
+ * **single-hop relation paths** (`contact.firstName`, `deal.title`). A relation path triggers a
+ * `LEFT JOIN`, so a missing relation means « no match on that branch of the OR » instead of dropping
+ * the row entirely.
  *
- * Numeric properties (`decimal`, `integer`, `float`) are coerced to string
- * via `CONCAT(field, '')` — DQL does not have a portable `CAST` function,
- * and `LOWER(numeric)` blows up in PostgreSQL with a type mismatch. Wrapping
- * the column in `CONCAT(col, '')` forces the DB to render it as text so
- * `?search=15000` matches a `Deal.amount` of `15000.00`.
+ * Numeric fields (`decimal`, `integer`, `float`) are coerced to text through `CONCAT(field, '')`:
+ * DQL has no portable `CAST`, and `LOWER(numeric)` fails on PostgreSQL with a type mismatch.
  *
- * Usage on entity:
- *   #[ApiFilter(OrSearchFilter::class, properties: ['email', 'firstName', 'lastName'])]
- *   #[ApiFilter(OrSearchFilter::class, properties: ['title', 'amount'])]
- *   #[ApiFilter(OrSearchFilter::class, properties: ['title', 'type', 'contact.firstName', 'contact.lastName', 'deal.title'])]
+ * Declared on the resource (API Platform ≥ 4.4):
  *
- * API call:
+ *   #[QueryParameter(key: 'search', filter: new OrSearchFilter(), properties: ['email', 'firstName', 'lastName'])]
+ *
  *   GET /api/users?search=admin
- *   → WHERE LOWER(email) LIKE '%admin%' OR LOWER(firstName) LIKE '%admin%' OR ...
- *   GET /api/activities?search=lambert
- *   → LEFT JOIN contact JOIN deal WHERE LOWER(title) LIKE '%lambert%' OR LOWER(contact.lastName) LIKE '%lambert%' OR ...
+ *   → WHERE LOWER(email) LIKE '%admin%' OR LOWER(firstName) LIKE '%admin%' OR …
  */
-final class OrSearchFilter extends AbstractFilter
+final class OrSearchFilter implements FilterInterface, OpenApiParameterFilterInterface, JsonSchemaFilterInterface
 {
+    use ParameterFilterTrait;
+
+    /**
+     * The parameter key these filters are conventionally declared under — the one the datatable's
+     * global search box sends.
+     */
     public const string PARAMETER_NAME = 'search';
 
     /**
-     * Doctrine field types cast to string before the LIKE compare.
+     * Doctrine field types cast to text before the LIKE compare.
      *
      * @var list<string>
      */
@@ -58,6 +57,10 @@ final class OrSearchFilter extends AbstractFilter
         Types::FLOAT,
     ];
 
+    /**
+     * @param class-string         $resourceClass
+     * @param array<string, mixed> $context
+     */
     public function apply(
         QueryBuilder $queryBuilder,
         QueryNameGeneratorInterface $queryNameGenerator,
@@ -65,54 +68,26 @@ final class OrSearchFilter extends AbstractFilter
         ?Operation $operation = null,
         array $context = [],
     ): void {
-        $filters = \is_array($context['filters'] ?? null) ? $context['filters'] : [];
-        $value = $filters[self::PARAMETER_NAME] ?? null;
+        $parameter = $this->parameterOf($context);
+        $value = $parameter instanceof Parameter ? $this->valueOf($parameter) : null;
+        $alias = $this->rootAliasOf($queryBuilder);
 
-        if (!\is_string($value) || '' === $value) {
+        if (!$parameter instanceof Parameter || !\is_string($value) || '' === $value || null === $alias) {
             return;
         }
 
-        $alias = $queryBuilder->getRootAliases()[0];
         $orConditions = [];
         $paramName = $queryNameGenerator->generateParameterName('or_search');
-        // Cache aliases for relation joins so multiple paths sharing the
-        // same first segment (e.g. `contact.firstName` + `contact.lastName`)
-        // reuse a single LEFT JOIN.
+        // One LEFT JOIN per relation, reused by every path that starts with it
+        // (`contact.firstName` + `contact.lastName`).
         $relationAliases = [];
 
-        foreach (array_keys($this->getProperties() ?? []) as $field) {
-            $field = (string) $field;
-            // ⚠️ A dot does NOT prove a relation. Doctrine maps an EMBEDDABLE's fields into the
-            // holder's own table and addresses them as `w.address.city` — joining `w.address`
-            // raises `Association name expected, 'address' is not an association.`, an uncaught
-            // 500 on a collection that answered perfectly until someone typed in the search box.
-            // The embedded case is therefore settled FIRST, on the metadata rather than on the
-            // shape of the string.
-            if (str_contains($field, '.') && $this->isMappedField($resourceClass, $field)) {
-                $column = $this->isNumericField($resourceClass, $field)
-                    ? "LOWER(CONCAT({$alias}.{$field}, ''))"
-                    : "LOWER({$alias}.{$field})";
-            } elseif (str_contains($field, '.')) {
-                [$relation, $subField] = explode('.', $field, 2);
-                if (!isset($relationAliases[$relation])) {
-                    $joinAlias = $queryNameGenerator->generateJoinAlias($relation);
-                    $queryBuilder->leftJoin("{$alias}.{$relation}", $joinAlias);
-                    $relationAliases[$relation] = $joinAlias;
-                }
-                $joinAlias = $relationAliases[$relation];
-                $column = $this->isNumericRelationField($resourceClass, $relation, $subField)
-                    ? "LOWER(CONCAT({$joinAlias}.{$subField}, ''))"
-                    : "LOWER({$joinAlias}.{$subField})";
-            } else {
-                $column = $this->isNumericField($resourceClass, $field)
-                    ? "LOWER(CONCAT({$alias}.{$field}, ''))"
-                    : "LOWER({$alias}.{$field})";
-            }
+        foreach ($this->fieldsOf($parameter) as $field) {
+            $column = $this->columnFor($queryBuilder, $queryNameGenerator, $resourceClass, $alias, $field, $relationAliases);
 
-            $orConditions[] = $queryBuilder->expr()->like(
-                $column,
-                "LOWER(:{$paramName})",
-            );
+            if (null !== $column) {
+                $orConditions[] = $queryBuilder->expr()->like($column, "LOWER(:{$paramName})");
+            }
         }
 
         if ([] === $orConditions) {
@@ -124,104 +99,67 @@ final class OrSearchFilter extends AbstractFilter
             ->setParameter($paramName, '%'.$value.'%');
     }
 
-    private function isNumericRelationField(string $resourceClass, string $relation, string $field): bool
+    /**
+     * @return array<string, mixed>
+     */
+    public function getSchema(Parameter $parameter): array
     {
-        if (!$this->managerRegistry instanceof ManagerRegistry || !class_exists($resourceClass)) {
-            return false;
-        }
-
-        /** @var class-string $resourceClass */
-        $manager = $this->managerRegistry->getManagerForClass($resourceClass);
-        if (!$manager instanceof ObjectManager) {
-            return false;
-        }
-
-        $rootMetadata = $manager->getClassMetadata($resourceClass);
-        // `getAssociationMapping` is ORM-specific — narrow from the abstract
-        // `Doctrine\Persistence\Mapping\ClassMetadata` to the ORM variant.
-        if (!$rootMetadata instanceof ORMClassMetadata) {
-            return false;
-        }
-        if (!$rootMetadata->hasAssociation($relation)) {
-            return false;
-        }
-
-        $targetClass = $rootMetadata->getAssociationMapping($relation)['targetEntity'] ?? null;
-        if (!\is_string($targetClass) || !class_exists($targetClass)) {
-            return false;
-        }
-
-        /** @var class-string $targetClass */
-        $targetMetadata = $manager->getClassMetadata($targetClass);
-        if (!$targetMetadata->hasField($field)) {
-            return false;
-        }
-
-        return \in_array($targetMetadata->getTypeOfField($field), self::NUMERIC_TYPES, true);
+        return ['type' => 'string'];
     }
 
     /**
-     * Is this dotted path a field of the resource ITSELF — that is, an embeddable's column?
+     * The fields the parameter declared, as strings — an empty list makes the filter a no-op rather
+     * than a query on a field named after an array index.
      *
-     * Doctrine registers `address.city` in the holder's own field mappings, so `hasField()`
-     * answers for it directly. A relation path (`category.label`) is not there: the field belongs
-     * to another class.
+     * @return list<string>
      */
-    private function isMappedField(string $resourceClass, string $property): bool
+    private function fieldsOf(Parameter $parameter): array
     {
-        if (!$this->managerRegistry instanceof ManagerRegistry || !class_exists($resourceClass)) {
-            return false;
-        }
-
-        /** @var class-string $resourceClass */
-        $manager = $this->managerRegistry->getManagerForClass($resourceClass);
-
-        return $manager instanceof ObjectManager && $manager->getClassMetadata($resourceClass)->hasField($property);
+        return array_values(array_filter($parameter->getProperties() ?? [], \is_string(...)));
     }
 
-    private function isNumericField(string $resourceClass, string $property): bool
-    {
-        if (!$this->managerRegistry instanceof ManagerRegistry || !class_exists($resourceClass)) {
-            return false;
-        }
-
-        /** @var class-string $resourceClass */
-        $manager = $this->managerRegistry->getManagerForClass($resourceClass);
-        if (!$manager instanceof ObjectManager) {
-            return false;
-        }
-
-        $metadata = $manager->getClassMetadata($resourceClass);
-        if (!$metadata->hasField($property)) {
-            return false;
-        }
-
-        return \in_array($metadata->getTypeOfField($property), self::NUMERIC_TYPES, true);
-    }
-
-    protected function filterProperty(
-        string $property,
-        mixed $value,
+    /**
+     * The lowered DQL expression one field contributes to the OR.
+     *
+     * @param class-string          $resourceClass
+     * @param array<string, string> $relationAliases join aliases already added, keyed by relation
+     */
+    private function columnFor(
         QueryBuilder $queryBuilder,
         QueryNameGeneratorInterface $queryNameGenerator,
         string $resourceClass,
-        ?Operation $operation = null,
-        array $context = [],
-    ): void {
-        // Not used — apply() handles everything
+        string $alias,
+        string $field,
+        array &$relationAliases,
+    ): ?string {
+        // ⚠️ A dot does NOT prove a relation. Doctrine maps an EMBEDDABLE's fields into the holder's
+        // own table and addresses them as `w.address.city` — joining `w.address` raises
+        // « Association name expected, 'address' is not an association », an uncaught 500 on a
+        // collection that answered perfectly until someone typed in the search box. The embedded
+        // case is therefore settled FIRST, on the metadata rather than on the shape of the string.
+        if (!str_contains($field, '.') || null !== $this->fieldTypeOf($queryBuilder, $resourceClass, $field)) {
+            return $this->lowered("{$alias}.{$field}", $this->fieldTypeOf($queryBuilder, $resourceClass, $field));
+        }
+
+        [$relation, $subField] = explode('.', $field, 2);
+        $target = $this->associationTargetOf($queryBuilder, $resourceClass, $relation);
+
+        if (null === $target) {
+            return null;
+        }
+
+        if (!isset($relationAliases[$relation])) {
+            $relationAliases[$relation] = $queryNameGenerator->generateJoinAlias($relation);
+            $queryBuilder->leftJoin("{$alias}.{$relation}", $relationAliases[$relation]);
+        }
+
+        return $this->lowered("{$relationAliases[$relation]}.{$subField}", $this->fieldTypeOf($queryBuilder, $target, $subField));
     }
 
-    public function getDescription(string $resourceClass): array
+    private function lowered(string $path, ?string $type): string
     {
-        $fields = array_keys($this->getProperties() ?? []);
-
-        return [
-            self::PARAMETER_NAME => [
-                'property' => implode(', ', $fields),
-                'type' => 'string',
-                'required' => false,
-                'description' => 'OR search across: '.implode(', ', $fields),
-            ],
-        ];
+        return \in_array($type, self::NUMERIC_TYPES, true)
+            ? "LOWER(CONCAT({$path}, ''))"
+            : "LOWER({$path})";
     }
 }

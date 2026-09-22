@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Jul6Art\ApiBundle\Tests\Functional;
 
+use ApiPlatform\Doctrine\Common\Filter\OrderFilterInterface;
 use Jul6Art\ApiBundle\Filter\CaseInsensitiveOrderFilter;
 use Jul6Art\ApiBundle\Filter\ConcatOrderFilter;
 use Jul6Art\ApiBundle\Filter\RankedOrderFilter;
@@ -12,6 +13,12 @@ use PHPUnit\Framework\Attributes\CoversNothing;
 
 /**
  * The three ordering filters, asserted on their DQL.
+ *
+ * Since API Platform 4.4 a filter is handed the `QueryParameter` it was declared on, with the request
+ * value already extracted — which property it orders is the parameter's, never a `properties` map of
+ * the filter's own. What is sortable at all is therefore decided by the resource declaration (the
+ * `properties` of the `order[:property]` template), and API Platform never calls a filter for a
+ * property the resource did not list.
  */
 #[CoversNothing]
 final class OrderFilterTest extends FilterTestCase
@@ -31,17 +38,7 @@ final class OrderFilterTest extends FilterTestCase
      */
     public function testATextColumnIsOrderedThroughAHiddenLoweredSelect(): void
     {
-        $queryBuilder = $this->queryBuilder();
-
-        $this->caseInsensitive(['name' => null])->apply(
-            $queryBuilder,
-            $this->nameGenerator(),
-            Widget::class,
-            $this->operation(),
-            ['filters' => ['order' => ['name' => 'asc']]],
-        );
-
-        $dql = $this->dql($queryBuilder);
+        $dql = $this->applyFilter(new CaseInsensitiveOrderFilter(), $this->parameter('order[name]', 'asc', 'name'));
 
         self::assertStringContainsString('LOWER(w.name) AS HIDDEN _ci_order_w_name', $dql);
         self::assertStringContainsString('ORDER BY _ci_order_w_name ASC', $dql);
@@ -54,50 +51,50 @@ final class OrderFilterTest extends FilterTestCase
      */
     public function testANumericColumnIsOrderedDirectly(): void
     {
-        $queryBuilder = $this->queryBuilder();
-
-        $this->caseInsensitive(['reference' => null])->apply(
-            $queryBuilder,
-            $this->nameGenerator(),
-            Widget::class,
-            $this->operation(),
-            ['filters' => ['order' => ['reference' => 'desc']]],
-        );
-
-        $dql = $this->dql($queryBuilder);
+        $dql = $this->applyFilter(new CaseInsensitiveOrderFilter(), $this->parameter('order[reference]', 'desc', 'reference'));
 
         self::assertStringContainsString('ORDER BY w.reference DESC', $dql);
         self::assertStringNotContainsString('LOWER', $dql);
     }
 
-    public function testAPropertyThatWasNotEnabledIsIgnored(): void
+    /**
+     * A related text column is LEFT-joined — a widget without a category must stay in the list — and
+     * lowered like any other text column, because the case problem does not stop at the root entity.
+     */
+    public function testARelatedTextColumnIsJoinedAndLowered(): void
     {
-        $queryBuilder = $this->queryBuilder();
+        $parameter = $this->nested($this->parameter('order[category.label]', 'asc', 'category.label'), ['category'], [Widget::class], 'label');
 
-        $this->caseInsensitive(['name' => null])->apply(
-            $queryBuilder,
-            $this->nameGenerator(),
-            Widget::class,
-            $this->operation(),
-            ['filters' => ['order' => ['status' => 'asc']]],
-        );
+        $dql = $this->applyFilter(new CaseInsensitiveOrderFilter(), $parameter);
 
-        self::assertStringNotContainsString('ORDER BY', $this->dql($queryBuilder));
+        self::assertStringContainsString('LEFT JOIN w.category', $dql);
+        self::assertMatchesRegularExpression('/LOWER\(\w+\.label\) AS HIDDEN/', $dql);
     }
 
-    public function testAnEmptyOrderingIsIgnored(): void
+    /**
+     * The direction is the request's, and only `asc` / `desc` are directions: anything else orders
+     * nothing rather than guessing.
+     */
+    public function testAnUnknownDirectionOrdersNothing(): void
     {
-        $queryBuilder = $this->queryBuilder();
+        self::assertStringNotContainsString('ORDER BY', $this->applyFilter(new CaseInsensitiveOrderFilter(), $this->parameter('order[name]', 'sideways', 'name')));
+    }
 
-        $this->caseInsensitive(['name' => null])->apply(
-            $queryBuilder,
-            $this->nameGenerator(),
-            Widget::class,
-            $this->operation(),
-            ['filters' => []],
-        );
+    public function testAParameterWithoutAPropertyOrdersNothing(): void
+    {
+        self::assertStringNotContainsString('ORDER BY', $this->applyFilter(new CaseInsensitiveOrderFilter(), $this->parameter('order[name]', 'asc')));
+    }
 
-        self::assertStringNotContainsString('ORDER BY', $this->dql($queryBuilder));
+    /**
+     * The NULL placement is a constructor option now: it used to sit in the per-property map that
+     * `AbstractFilter` resolved, which the 4.4 filters no longer receive.
+     */
+    public function testNullsCanBePlacedAfterEveryValue(): void
+    {
+        $dql = $this->applyFilter(new CaseInsensitiveOrderFilter(OrderFilterInterface::NULLS_ALWAYS_LAST), $this->parameter('order[status]', 'asc', 'status'));
+
+        self::assertStringContainsString('CASE WHEN w.status IS NULL THEN 0 ELSE 1 END AS HIDDEN _w_status_null_rank', $dql);
+        self::assertStringContainsString('ORDER BY _w_status_null_rank DESC, _ci_order_w_status ASC', $dql);
     }
 
     // ── RankedOrderFilter ─────────────────────────────────────────────────
@@ -108,17 +105,7 @@ final class OrderFilterTest extends FilterTestCase
      */
     public function testABusinessRankOrdersByCaseExpression(): void
     {
-        $queryBuilder = $this->queryBuilder();
-
-        $this->ranked()->apply(
-            $queryBuilder,
-            $this->nameGenerator(),
-            Widget::class,
-            $this->operation(),
-            ['filters' => ['order' => ['status' => 'asc']]],
-        );
-
-        $dql = $this->dql($queryBuilder);
+        $dql = $this->applyFilter($this->ranked(), $this->parameter('order[status]', 'asc', 'status'));
 
         self::assertStringContainsString('CASE', $dql);
         self::assertStringContainsString('THEN 0', $dql);
@@ -137,18 +124,15 @@ final class OrderFilterTest extends FilterTestCase
      */
     public function testAnUnrankedValueSortsLast(): void
     {
-        $queryBuilder = $this->queryBuilder();
+        $dql = $this->applyFilter($this->ranked(), $this->parameter('order[status]', 'asc', 'status'));
 
-        $this->ranked()->apply(
-            $queryBuilder,
-            $this->nameGenerator(),
-            Widget::class,
-            $this->operation(),
-            ['filters' => ['order' => ['status' => 'asc']]],
-        );
+        // The ELSE branch carries a rank above every declared one: three ranks, ELSE 3.
+        self::assertStringContainsString('ELSE 3 END', $dql);
+    }
 
-        // The ELSE branch carries a rank above every declared one.
-        self::assertMatchesRegularExpression('/ELSE (\d+) END/', $this->dql($queryBuilder));
+    public function testARankingWithoutValuesOrdersNothing(): void
+    {
+        self::assertStringNotContainsString('ORDER BY', $this->applyFilter(new RankedOrderFilter(), $this->parameter('order[status]', 'asc', 'status')));
     }
 
     // ── ConcatOrderFilter ─────────────────────────────────────────────────
@@ -159,69 +143,37 @@ final class OrderFilterTest extends FilterTestCase
      */
     public function testOnePropertyOrdersBySeveralColumns(): void
     {
-        $queryBuilder = $this->queryBuilder();
+        $dql = $this->applyFilter(new ConcatOrderFilter(['name', 'status']), $this->parameter('order[fullName]', 'DESC'));
 
-        new ConcatOrderFilter($this->registry, null, ['fullName' => ['name', 'status']])->apply(
-            $queryBuilder,
-            $this->nameGenerator(),
-            Widget::class,
-            $this->operation(),
-            ['filters' => ['order' => ['fullName' => 'DESC']]],
-        );
-
-        $dql = $this->dql($queryBuilder);
-
-        self::assertStringContainsString('w.name DESC', $dql);
-        self::assertStringContainsString('w.status DESC', $dql);
+        self::assertStringContainsString('ORDER BY w.name DESC, w.status DESC', $dql);
     }
 
     public function testAnUnknownDirectionFallsBackToAscending(): void
     {
-        $queryBuilder = $this->queryBuilder();
-
-        new ConcatOrderFilter($this->registry, null, ['fullName' => ['name']])->apply(
-            $queryBuilder,
-            $this->nameGenerator(),
-            Widget::class,
-            $this->operation(),
-            ['filters' => ['order' => ['fullName' => 'sideways']]],
-        );
-
-        self::assertStringContainsString('w.name ASC', $this->dql($queryBuilder));
+        self::assertStringContainsString('w.name ASC', $this->applyFilter(new ConcatOrderFilter(['name']), $this->parameter('order[fullName]', 'sideways')));
     }
 
+    // ── the three together ────────────────────────────────────────────────
+
     /**
-     * Two ordering filters on the same `order` parameter is the normal case — a resource sorts some
-     * columns case-insensitively and others by business rank — and they must not erase each other.
+     * Several ordering filters on one resource is the normal case — a resource sorts some columns
+     * case-insensitively and others by business rank — and each must add its clause without erasing
+     * the other's. API Platform applies them one after the other, on the same query.
      */
-    public function testTwoOrderingFiltersCoexistOnTheSameParameter(): void
+    public function testTwoOrderingFiltersCoexistOnTheSameQuery(): void
     {
         $queryBuilder = $this->queryBuilder();
-        $context = ['filters' => ['order' => ['name' => 'asc', 'status' => 'desc']]];
 
-        $this->caseInsensitive(['name' => null])->apply($queryBuilder, $this->nameGenerator(), Widget::class, $this->operation(), $context);
-        $this->ranked()->apply($queryBuilder, $this->nameGenerator(), Widget::class, $this->operation(), $context);
+        $this->applyFilter(new CaseInsensitiveOrderFilter(), $this->parameter('order[name]', 'asc', 'name'), $queryBuilder);
+        $dql = $this->applyFilter($this->ranked(), $this->parameter('order[status]', 'desc', 'status'), $queryBuilder);
 
-        $dql = $this->dql($queryBuilder);
-
-        self::assertStringContainsString('_ci_order_w_name', $dql);
-        self::assertStringContainsString('CASE', $dql);
+        self::assertStringContainsString('ORDER BY _ci_order_w_name ASC, _rank_order_w_status DESC', $dql);
     }
 
     // ── helpers ───────────────────────────────────────────────────────────
 
-    /**
-     * @param array<string, mixed> $properties
-     */
-    private function caseInsensitive(array $properties): CaseInsensitiveOrderFilter
-    {
-        return new CaseInsensitiveOrderFilter($this->registry, 'order', null, $properties);
-    }
-
     private function ranked(): RankedOrderFilter
     {
-        return new RankedOrderFilter($this->registry, 'order', null, [
-            'status' => ['todo', 'doing', 'done'],
-        ]);
+        return new RankedOrderFilter(['todo', 'doing', 'done']);
     }
 }

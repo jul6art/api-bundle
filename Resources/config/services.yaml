@@ -4,3 +4,12 @@ services:
     # Anything conditional — a brick that needs an optional package, or a service the
     # application may not have — is registered from the extension or removed by a compiler
     # pass instead. Cf. DependencyInjection/ApiExtension.php.
+
+    # Resolves the IRIs a RelationFilter receives, and leaves a plain identifier alone. API
+    # Platform finds it in the `api_platform.parameter_provider` locator by this key — the class
+    # name `RelationFilter::getParameterProvider()` returns.
+    Jul6Art\ApiBundle\State\RelationParameterProvider:
+        arguments:
+            $iriConverter: '@api_platform.iri_converter'
+        tags:
+            - { name: api_platform.parameter_provider, key: Jul6Art\ApiBundle\State\RelationParameterProvider }

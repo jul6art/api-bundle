@@ -4,25 +4,43 @@ declare(strict_types=1);
 
 namespace Jul6Art\ApiBundle\Filter;
 
-use ApiPlatform\Doctrine\Orm\Filter\AbstractFilter;
+use ApiPlatform\Doctrine\Orm\Filter\FilterInterface;
 use ApiPlatform\Doctrine\Orm\Util\QueryNameGeneratorInterface;
+use ApiPlatform\Metadata\JsonSchemaFilterInterface;
+use ApiPlatform\Metadata\OpenApiParameterFilterInterface;
 use ApiPlatform\Metadata\Operation;
+use ApiPlatform\Metadata\Parameter;
+use ApiPlatform\Metadata\SortFilterInterface;
 use Doctrine\ORM\QueryBuilder;
 
 /**
- * Concat Order Filter — allows ordering by a virtual concatenated field.
+ * Orders by a **virtual** field made of several real ones — typically a `fullName` computed in PHP,
+ * which no `ORDER BY` can reach as such.
  *
- * Registers a virtual order property that sorts by CONCAT of multiple real fields.
+ * Declared on the resource (API Platform ≥ 4.4), one explicit key per virtual field, the real
+ * columns given in the order they sort by:
  *
- * Usage on entity:
- *   #[ApiFilter(ConcatOrderFilter::class, properties: ['fullName' => ['firstName', 'lastName']])]
+ *   #[QueryParameter(key: 'order[fullName]', filter: new ConcatOrderFilter(['lastName', 'firstName']))]
  *
- * API call:
  *   GET /api/users?order[fullName]=asc
- *   → ORDER BY firstName ASC, lastName ASC
+ *   → ORDER BY lastName ASC, firstName ASC
  */
-final class ConcatOrderFilter extends AbstractFilter
+final readonly class ConcatOrderFilter implements FilterInterface, OpenApiParameterFilterInterface, JsonSchemaFilterInterface, SortFilterInterface
 {
+    use ParameterFilterTrait;
+
+    /**
+     * @param list<string> $fields the real fields, in the order they sort by
+     */
+    public function __construct(
+        private array $fields = [],
+    ) {
+    }
+
+    /**
+     * @param class-string         $resourceClass
+     * @param array<string, mixed> $context
+     */
     public function apply(
         QueryBuilder $queryBuilder,
         QueryNameGeneratorInterface $queryNameGenerator,
@@ -30,69 +48,31 @@ final class ConcatOrderFilter extends AbstractFilter
         ?Operation $operation = null,
         array $context = [],
     ): void {
-        $filters = \is_array($context['filters'] ?? null) ? $context['filters'] : [];
-        $orderParams = $filters['order'] ?? [];
+        $parameter = $this->parameterOf($context);
+        $value = $parameter instanceof Parameter ? $this->valueOf($parameter) : null;
+        // Any direction that is not `desc` sorts ascending, as it always has: a mistyped direction
+        // still orders the list rather than leaving it in insertion order.
+        $direction = \is_string($value) ? ($this->sortDirectionOf($value) ?? \SortDirection::Ascending) : null;
+        $alias = $this->rootAliasOf($queryBuilder);
 
-        if (!\is_array($orderParams)) {
+        if (!$direction instanceof \SortDirection || null === $alias) {
             return;
         }
 
-        $alias = $queryBuilder->getRootAliases()[0] ?? null;
-
-        if (!\is_string($alias)) {
-            return;
-        }
-        $properties = $this->getProperties() ?? [];
-
-        foreach ($orderParams as $property => $direction) {
-            if (!\array_key_exists($property, $properties)) {
-                continue;
-            }
-
-            $fields = $properties[$property];
-
-            if (!\is_array($fields) || [] === $fields) {
-                continue;
-            }
-
-            $direction = \is_string($direction) && 'DESC' === strtoupper($direction) ? 'DESC' : 'ASC';
-
-            foreach ($fields as $field) {
-                // Un champ qui ne serait pas une chaîne construirait un DQL invalide : on
-                // l'ignore plutôt que de laisser Doctrine échouer sur une expression bâtarde.
-                if (\is_string($field)) {
-                    $queryBuilder->addOrderBy(\sprintf('%s.%s', $alias, $field), $direction);
-                }
+        foreach ($this->fields as $field) {
+            // A field that is not a string would build invalid DQL: skip it rather than let Doctrine
+            // fail on a half-built expression.
+            if (\is_string($field) && '' !== $field) {
+                $queryBuilder->addOrderBy(\sprintf('%s.%s', $alias, $field), $direction);
             }
         }
     }
 
-    protected function filterProperty(
-        string $property,
-        mixed $value,
-        QueryBuilder $queryBuilder,
-        QueryNameGeneratorInterface $queryNameGenerator,
-        string $resourceClass,
-        ?Operation $operation = null,
-        array $context = [],
-    ): void {
-        // Not used — apply() handles everything
-    }
-
-    public function getDescription(string $resourceClass): array
+    /**
+     * @return array<string, mixed>
+     */
+    public function getSchema(Parameter $parameter): array
     {
-        $description = [];
-
-        foreach (array_keys($this->getProperties() ?? []) as $property) {
-            $description["order[{$property}]"] = [
-                'property' => $property,
-                'type' => 'string',
-                'required' => false,
-                'description' => "Order by virtual field {$property} (asc/desc)",
-                'schema' => ['type' => 'string', 'enum' => ['asc', 'desc']],
-            ];
-        }
-
-        return $description;
+        return ['type' => 'string', 'enum' => ['asc', 'desc', 'ASC', 'DESC']];
     }
 }

@@ -4,9 +4,12 @@ declare(strict_types=1);
 
 namespace Jul6Art\ApiBundle\Tests\Functional;
 
+use ApiPlatform\OpenApi\Model\Parameter as OpenApiParameter;
 use Jul6Art\ApiBundle\Filter\JsonContainsFilter;
 use Jul6Art\ApiBundle\Filter\OrSearchFilter;
+use Jul6Art\ApiBundle\Filter\RelationFilter;
 use Jul6Art\ApiBundle\Filter\YearFilter;
+use Jul6Art\ApiBundle\State\RelationParameterProvider;
 use Jul6Art\ApiBundle\Tests\Fixtures\Entity\Widget;
 use PHPUnit\Framework\Attributes\CoversNothing;
 
@@ -39,9 +42,7 @@ final class SearchFilterTest extends FilterTestCase
      */
     public function testANumericColumnIsCastBeforeBeingMatched(): void
     {
-        $dql = $this->applySearch(['reference'], '42');
-
-        self::assertStringContainsString('CONCAT(w.reference', $dql);
+        self::assertStringContainsString('CONCAT(w.reference', $this->applySearch(['reference'], '42'));
     }
 
     /**
@@ -89,22 +90,75 @@ final class SearchFilterTest extends FilterTestCase
 
     public function testANonScalarTermIsIgnored(): void
     {
-        $queryBuilder = $this->queryBuilder();
+        $dql = $this->applyFilter(new OrSearchFilter(), $this->parameter(OrSearchFilter::PARAMETER_NAME, ['not', 'a', 'string'], properties: ['name']));
 
-        new OrSearchFilter($this->registry, null, ['name' => null])->apply(
-            $queryBuilder,
-            $this->nameGenerator(),
-            Widget::class,
-            $this->operation(),
-            ['filters' => [OrSearchFilter::PARAMETER_NAME => ['not', 'a', 'string']]],
-        );
-
-        self::assertStringNotContainsString('WHERE', $this->dql($queryBuilder));
+        self::assertStringNotContainsString('WHERE', $dql);
     }
 
     public function testAColumnThatWasNotDeclaredIsNeverSearched(): void
     {
         self::assertStringNotContainsString('w.status', $this->applySearch(['name'], 'tourne'));
+    }
+
+    /**
+     * A path through something that is neither a field nor a relation is skipped, not joined: a
+     * mistyped property would otherwise turn every search into a 500.
+     */
+    public function testAnUnknownRelationIsSkipped(): void
+    {
+        $dql = $this->applySearch(['name', 'nowhere.label'], 'tourne');
+
+        self::assertStringNotContainsString('nowhere', $dql);
+        self::assertStringContainsString('LOWER(w.name)', $dql);
+    }
+
+    // ── RelationFilter ────────────────────────────────────────────────────
+
+    /**
+     * The shape every datatable of this ecosystem sends: a plain identifier. API Platform 4.4 maps a
+     * relation `SearchFilter` to `IriFilter`, which would log this value as an error and filter
+     * NOTHING — the collection would answer with every row.
+     */
+    public function testAPlainIdentifierFiltersTheRelation(): void
+    {
+        $dql = $this->applyFilter(new RelationFilter(), $this->parameter('category', '12', 'category'));
+
+        self::assertMatchesRegularExpression('/WHERE w\.category = :\w+/', $dql);
+    }
+
+    public function testSeveralIdentifiersBecomeAnInList(): void
+    {
+        $dql = $this->applyFilter(new RelationFilter(), $this->parameter('category', ['12', '14'], 'category'));
+
+        self::assertMatchesRegularExpression('/WHERE w\.category IN \(:\w+\)/', $dql);
+    }
+
+    /**
+     * A relation of a relation (`site.customer`) is joined first, then compared — the path is what a
+     * screen filtering equipment by customer sends.
+     */
+    public function testANestedRelationIsJoinedBeforeBeingCompared(): void
+    {
+        $parameter = $this->nested($this->parameter('category.parent', '3', 'category.parent'), ['category'], [Widget::class], 'parent');
+
+        $dql = $this->applyFilter(new RelationFilter(), $parameter);
+
+        self::assertStringContainsString('JOIN w.category', $dql);
+        self::assertMatchesRegularExpression('/\w+\.parent = :\w+/', $dql);
+    }
+
+    public function testAnOperatorMapIsNotARelationLookup(): void
+    {
+        self::assertStringNotContainsString('WHERE', $this->applyFilter(new RelationFilter(), $this->parameter('category', ['gt' => '3'], 'category')));
+    }
+
+    /**
+     * The IRIs are resolved by the provider, BEFORE the filter runs; the filter is told which one it
+     * needs, so API Platform calls it.
+     */
+    public function testTheFilterDeclaresTheProviderThatResolvesIris(): void
+    {
+        self::assertSame(RelationParameterProvider::class, RelationFilter::getParameterProvider());
     }
 
     // ── YearFilter ────────────────────────────────────────────────────────
@@ -118,17 +172,7 @@ final class SearchFilterTest extends FilterTestCase
      */
     public function testAYearBecomesAHalfOpenRange(): void
     {
-        $queryBuilder = $this->queryBuilder();
-
-        new YearFilter($this->registry, null, ['issuedAt' => null])->apply(
-            $queryBuilder,
-            $this->nameGenerator(),
-            Widget::class,
-            $this->operation(),
-            ['filters' => ['issuedAt' => '2026']],
-        );
-
-        $dql = $this->dql($queryBuilder);
+        $dql = $this->applyFilter(new YearFilter(), $this->parameter('issuedAt', '2026', 'issuedAt'));
 
         self::assertStringContainsString('w.issuedAt >=', $dql);
         self::assertStringContainsString('w.issuedAt <', $dql);
@@ -137,17 +181,16 @@ final class SearchFilterTest extends FilterTestCase
 
     public function testANonYearValueIsIgnored(): void
     {
-        $queryBuilder = $this->queryBuilder();
+        self::assertStringNotContainsString('WHERE', $this->applyFilter(new YearFilter(), $this->parameter('issuedAt', 'l\'an dernier', 'issuedAt')));
+    }
 
-        new YearFilter($this->registry, null, ['issuedAt' => null])->apply(
-            $queryBuilder,
-            $this->nameGenerator(),
-            Widget::class,
-            $this->operation(),
-            ['filters' => ['issuedAt' => 'l\'an dernier']],
-        );
-
-        self::assertStringNotContainsString('WHERE', $this->dql($queryBuilder));
+    /**
+     * The `[after]` / `[before]` map belongs to a `DateFilter` chained on the same key: this filter
+     * must leave it alone rather than read it as a year.
+     */
+    public function testADateRangeIsLeftToTheDateFilter(): void
+    {
+        self::assertStringNotContainsString('WHERE', $this->applyFilter(new YearFilter(), $this->parameter('issuedAt', ['after' => '2026-01-01'], 'issuedAt')));
     }
 
     // ── JsonContainsFilter ────────────────────────────────────────────────
@@ -162,47 +205,34 @@ final class SearchFilterTest extends FilterTestCase
      */
     public function testAJsonArrayIsSearchedThroughJsonText(): void
     {
-        $queryBuilder = $this->queryBuilder();
-
-        new JsonContainsFilter($this->registry, null, ['roles' => null])->apply(
-            $queryBuilder,
-            $this->nameGenerator(),
-            Widget::class,
-            $this->operation(),
-            ['filters' => ['roles' => 'ROLE_ADMIN']],
-        );
-
-        $dql = $this->dql($queryBuilder);
+        $dql = $this->applyFilter(new JsonContainsFilter(), $this->parameter('roles', 'ROLE_ADMIN', 'roles'));
 
         self::assertStringContainsString('JSON_TEXT(w.roles)', $dql);
         self::assertStringContainsString('LIKE', $dql);
     }
 
-    public function testAnUndeclaredJsonPropertyIsIgnored(): void
+    public function testAnEmptyJsonTermIsIgnored(): void
     {
-        $queryBuilder = $this->queryBuilder();
-
-        new JsonContainsFilter($this->registry, null, ['roles' => null])->apply(
-            $queryBuilder,
-            $this->nameGenerator(),
-            Widget::class,
-            $this->operation(),
-            ['filters' => ['name' => 'tourne']],
-        );
-
-        self::assertStringNotContainsString('WHERE', $this->dql($queryBuilder));
+        self::assertStringNotContainsString('WHERE', $this->applyFilter(new JsonContainsFilter(), $this->parameter('roles', '', 'roles')));
     }
 
     /**
-     * The description feeds the OpenAPI document; an empty one means the filter exists and nobody
-     * can discover it.
+     * The OpenAPI document is built from the parameter now — `getDescription()` answers an empty
+     * array by contract — and a filter nobody can discover is a filter nobody uses.
      */
-    public function testTheFilterDescribesItselfForOpenApi(): void
+    public function testTheFilterDescribesItsParameterForOpenApi(): void
     {
-        $description = new JsonContainsFilter($this->registry, null, ['roles' => null])->getDescription(Widget::class);
+        $openApi = new JsonContainsFilter()->getOpenApiParameters($this->parameter('roles', null, 'roles'));
+        // Without `castToArray`, API Platform documents the scalar AND the array form of the key.
+        $names = [];
+        foreach (\is_array($openApi) ? $openApi : [$openApi] as $parameter) {
+            if ($parameter instanceof OpenApiParameter) {
+                $names[] = $parameter->getName();
+            }
+        }
 
-        self::assertArrayHasKey('roles', $description);
-        self::assertSame('roles', $description['roles']['property'] ?? null);
+        self::assertContains('roles', $names);
+        self::assertSame([], new JsonContainsFilter()->getDescription(Widget::class));
     }
 
     // ── helpers ───────────────────────────────────────────────────────────
@@ -212,16 +242,6 @@ final class SearchFilterTest extends FilterTestCase
      */
     private function applySearch(array $properties, string $term): string
     {
-        $queryBuilder = $this->queryBuilder();
-
-        new OrSearchFilter($this->registry, null, array_fill_keys($properties, null))->apply(
-            $queryBuilder,
-            $this->nameGenerator(),
-            Widget::class,
-            $this->operation(),
-            ['filters' => [OrSearchFilter::PARAMETER_NAME => $term]],
-        );
-
-        return $this->dql($queryBuilder);
+        return $this->applyFilter(new OrSearchFilter(), $this->parameter(OrSearchFilter::PARAMETER_NAME, $term, properties: $properties));
     }
 }
