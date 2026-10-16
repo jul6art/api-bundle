@@ -7,7 +7,7 @@ Symfony API Platform bundle
 
 <p align="left">
     <a href="https://opensource.org/licenses/MIT" target="_blank"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License"></a>
-    <img src="https://img.shields.io/static/v1?label=stable&message=v2.0.1&color=0ea5e9" alt="Version">
+    <img src="https://img.shields.io/static/v1?label=stable&message=v2.0.2&color=0ea5e9" alt="Version">
 </p>
 
 Symfony API Platform bundle
@@ -17,7 +17,7 @@ Requirements
 
 - PHP ^8.5
 - Symfony ^7.4 || ^8.0
-- API Platform ^4.4
+- API Platform ^4.4 || ^5.0
 - Doctrine ORM ^3.7
 
 Installation
