@@ -63,7 +63,7 @@ final class SearchFilterTest extends FilterTestCase
      * ⚠️ A dotted path is not proof of a relation. Doctrine maps an embeddable's fields into the
      * holder's own table, so `LEFT JOIN w.address` raises `Association name expected, 'address' is
      * not an association.` — an uncaught 500 on a collection that answered perfectly until someone
-     * typed in the search box. Found on wovex the 2026-08-25: `/api/sites?search=…` had been
+     * typed in the search box. Found on cereezer the 2026-08-25: a collection's `?search=…` had been
      * broken since the day the filter named `address.city`, and no screen had used it yet.
      */
     public function testAnEmbeddedFieldIsReadDirectlyRatherThanJoined(): void
