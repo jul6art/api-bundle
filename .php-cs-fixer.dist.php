@@ -21,6 +21,7 @@ $finder = new PhpCsFixer\Finder()
             __DIR__.'/DependencyInjection',
             __DIR__.'/Filter',
             __DIR__.'/State',
+            __DIR__.'/Test',
             __DIR__.'/Tests',
         ],
         is_dir(...),

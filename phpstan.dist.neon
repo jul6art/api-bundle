@@ -9,6 +9,7 @@ parameters:
         - Filter
         - State
         - DependencyInjection
+        - Test
         - Tests
         - rector.php
     treatPhpDocTypesAsCertain: false

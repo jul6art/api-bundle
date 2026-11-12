@@ -7,7 +7,7 @@ Symfony API Platform bundle
 
 <p align="left">
     <a href="https://opensource.org/licenses/MIT" target="_blank"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License"></a>
-    <img src="https://img.shields.io/static/v1?label=stable&message=v2.0.2&color=0ea5e9" alt="Version">
+    <img src="https://img.shields.io/static/v1?label=stable&message=v2.1.0&color=0ea5e9" alt="Version">
 </p>
 
 Symfony API Platform bundle
@@ -18,6 +18,7 @@ Requirements
 - PHP ^8.5
 - Symfony ^7.4 || ^8.0
 - API Platform ^4.4 || ^5.0
+- jul6art/core-bundle ^3.10
 - Doctrine ORM ^3.7
 
 Installation
@@ -214,6 +215,24 @@ one of the three is how they drift.
 bundle is to carry it **once** instead of in every application. The test suite asserts the DQL
 those filters produce, so an upstream change that alters the contract shows up here rather than in
 a sorted list nobody checks.
+
+Every operation says who may call it, tested
+--------------------------------------------
+
+`Test\ApiExposureTestCase` checks, once per project, that the production configuration writes a
+default rule (`api_platform.defaults.security`, closed: a forgotten rule refuses instead of
+opening) and that every operation of the project carries a rule, its own or that default:
+
+```php
+// tests/Architecture/ApiOperationSecurityTest.php
+final class ApiOperationSecurityTest extends ApiExposureTestCase
+{
+}
+```
+
+API Platform's own resources (its error representations) and the operations it creates only to
+build an IRI (`NotExposed`) answer no request and are left out. The default is read without
+booting a production kernel (core-bundle's `Test\KernelConfiguration`).
 
 Upgrading to 2.0
 ----------------

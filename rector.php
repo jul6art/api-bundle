@@ -14,6 +14,7 @@ return RectorConfig::configure()
         __DIR__.'/Filter',
         __DIR__.'/State',
         __DIR__.'/DependencyInjection',
+        __DIR__.'/Test',
         __DIR__.'/Tests',
     ])
     // No argument: the target PHP version is read from the "php" constraint in
